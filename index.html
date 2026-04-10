@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>NAGASAKA Meme Friday Night - 外部譜面読み込み版</title>
+    <style>
+        body { background-color: #1a1a1a; color: white; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; }
+        #setup-area { background-color: #333; padding: 20px; border-radius: 10px; margin-bottom: 20px; width: 400px; box-sizing: border-box; }
+        .file-input { margin-bottom: 10px; }
+        #game-board { width: 400px; height: 600px; background-color: #000; border: 2px solid #555; position: relative; overflow: hidden; display: flex; }
+        .lane { flex: 1; border-right: 1px solid #333; position: relative; }
+        .lane:last-child { border-right: none; }
+        #hit-line { position: absolute; bottom: 50px; width: 100%; height: 10px; background-color: rgba(255, 255, 255, 0.5); z-index: 10; }
+        .note { width: 80%; height: 20px; background-color: #00ffcc; position: absolute; left: 10%; border-radius: 5px; box-shadow: 0 0 10px #00ffcc; }
+        #ui { text-align: center; width: 400px; display: flex; justify-content: space-between; font-size: 24px; margin: 10px 0; }
+        #controls { display: flex; width: 400px; justify-content: space-around; margin-top: 10px; font-weight: bold; color: #aaa; }
+        button { padding: 10px; cursor: pointer; background-color: #ff0055; color: white; border: none; border-radius: 5px; font-weight: bold; width: 100%; font-size: 18px;}
+        button:disabled { background-color: #555; cursor: not-allowed; }
+        .hit-effect { position: absolute; bottom: 50px; width: 100%; height: 20px; background-color: rgba(255, 255, 255, 0.8); opacity: 0; transition: opacity 0.1s; }
+    </style>
+</head>
+<body>
+
+    <h1>NAGASAKA Meme Friday Night</h1>
+
+    <div id="setup-area">
+        <div class="file-input">
+            <label>1. 楽曲(MP3):</label><br>
+            <input type="file" id="audio-upload" accept="audio/*">
+        </div>
+        <div class="file-input">
+            <label>2. 譜面データ(JSON):</label><br>
+            <input type="file" id="json-upload" accept=".json">
+        </div>
+        <button id="start-btn" disabled>準備完了したらスタート</button>
+    </div>
+
+    <div id="ui">
+        <div>Score: <span id="score">0</span></div>
+        <div>Combo: <span id="combo">0</span></div>
+    </div>
+
+    <div id="game-board">
+        <div id="hit-line"></div>
+        <div class="lane" id="lane-0"><div class="hit-effect" id="effect-0"></div></div>
+        <div class="lane" id="lane-1"><div class="hit-effect" id="effect-1"></div></div>
+        <div class="lane" id="lane-2"><div class="hit-effect" id="effect-2"></div></div>
+        <div class="lane" id="lane-3"><div class="hit-effect" id="effect-3"></div></div>
+    </div>
+
+    <div id="controls">
+        <span>[ D ]</span><span>[ F ]</span><span>[ J ]</span><span>[ K ]</span>
+    </div>
+
+    <script>
+        const audioUpload = document.getElementById('audio-upload');
+        const jsonUpload = document.getElementById('json-upload');
+        const startBtn = document.getElementById('start-btn');
+        const lanes = [document.getElementById('lane-0'), document.getElementById('lane-1'), document.getElementById('lane-2'), document.getElementById('lane-3')];
+        
+        let audioContext, audioBuffer, audioSource;
+        let isPlaying = false;
+        let score = 0, combo = 0;
+        let activeNotes = [];
+        let beatMap = []; 
+        let gameStartTime = 0;
+        
+        const fallDuration = 1.5; 
+        const hitZoneY = 550; 
+        const velocity = hitZoneY / fallDuration; 
+        const hitTolerance = 40; 
+        const keys = ['d', 'f', 'j', 'k'];
+
+        // 状態チェック
+        function checkReady() {
+            if (audioBuffer && beatMap.length > 0) {
+                startBtn.disabled = false;
+            }
+        }
+
+        // 音声読み込み
+        audioUpload.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const arrayBuffer = await file.arrayBuffer();
+            audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+            checkReady();
+        });
+
+        // JSON譜面読み込み
+        jsonUpload.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                try {
+                    beatMap = JSON.parse(event.target.result);
+                    // 処理用にフラグを追加
+                    beatMap.forEach(note => { note.spawned = false; });
+                    checkReady();
+                } catch (err) {
+                    alert('JSONファイルの読み込みに失敗しました。');
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        startBtn.addEventListener('click', () => {
+            if (isPlaying) return;
+            isPlaying = true;
+            score = 0; combo = 0;
+            activeNotes.forEach(n => n.element.remove());
+            activeNotes = [];
+            beatMap.forEach(note => { note.spawned = false; });
+            document.getElementById('score').innerText = score;
+            document.getElementById('combo').innerText = combo;
+            
+            startBtn.disabled = true;
+            gameStartTime = audioContext.currentTime;
+
+            audioSource = audioContext.createBufferSource();
+            audioSource.buffer = audioBuffer;
+            audioSource.connect(audioContext.destination);
+            audioSource.start(gameStartTime + fallDuration);
+            
+            requestAnimationFrame(update);
+        });
+
+        function update() {
+            if (!isPlaying) return;
+            const t = audioContext.currentTime - gameStartTime;
+
+            // 譜面データからノーツを生成
+            for (let i = 0; i < beatMap.length; i++) {
+                let noteData = beatMap[i];
+                // 落下時間分、早めに画面上部に出現させる
+                if (!noteData.spawned && noteData.time <= t + fallDuration) {
+                    createNote(noteData);
+                    noteData.spawned = true;
+                }
+            }
+
+            // ノーツの移動とミス判定
+            for (let i = activeNotes.length - 1; i >= 0; i--) {
+                let note = activeNotes[i];
+                // 基準時間(t) からどれくらい経過しているかでY座標を計算
+                note.y = (t - (note.targetTime - fallDuration)) * velocity;
+                note.element.style.top = note.y + 'px';
+
+                if (note.y > 600) {
+                    note.element.remove();
+                    activeNotes.splice(i, 1);
+                    combo = 0; 
+                    document.getElementById('combo').innerText = combo;
+                }
+            }
+
+            if (t > audioBuffer.duration + fallDuration + 1) {
+                isPlaying = false;
+                startBtn.disabled = false;
+                alert('クリア！ スコア: ' + score);
+            } else {
+                requestAnimationFrame(update);
+            }
+        }
+
+        function createNote(noteData) {
+            const noteEl = document.createElement('div');
+            noteEl.classList.add('note');
+            noteEl.style.top = '0px';
+            lanes[noteData.lane].appendChild(noteEl);
+            
+            activeNotes.push({
+                element: noteEl,
+                lane: noteData.lane,
+                targetTime: noteData.time, // 叩くべき時間
+                y: 0
+            });
+        }
+
+        window.addEventListener('keydown', (e) => {
+            if (!isPlaying) return;
+            const keyIndex = keys.indexOf(e.key.toLowerCase());
+            if (keyIndex !== -1) {
+                const effect = document.getElementById(`effect-${keyIndex}`);
+                effect.style.opacity = 1;
+                setTimeout(() => effect.style.opacity = 0, 100);
+                hitNote(keyIndex);
+            }
+        });
+
+        function hitNote(laneIndex) {
+            const laneNotes = activeNotes.filter(n => n.lane === laneIndex);
+            if (laneNotes.length === 0) return;
+
+            const targetNote = laneNotes.reduce((prev, current) => (prev.y > current.y) ? prev : current);
+            const diff = Math.abs(targetNote.y - (hitZoneY - 20));
+
+            if (diff < hitTolerance * 1.5) {
+                score += (diff < hitTolerance) ? 100 + (combo * 10) : 50;
+                combo++;
+                targetNote.element.remove();
+                activeNotes.splice(activeNotes.indexOf(targetNote), 1);
+                
+                document.getElementById('score').innerText = score;
+                document.getElementById('combo').innerText = combo;
+            }
+        }
+    </script>
+</body>
+</html>
